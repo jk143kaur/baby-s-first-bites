@@ -12,14 +12,26 @@ from dotenv import load_dotenv
 from streamlit_mic_recorder import mic_recorder
 from pathlib import Path
 from ingestfromurl import ingest_video_from_url
+import requests
+import zipfile
 
+# ----------------------------
+# Load environment variables
+# ----------------------------
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# ----------------------------
+# Constants
+# ----------------------------
 PERSIST_DIRECTORY = "chroma_db"
 SPEECH_FILE_PATH = Path(__file__).parent / "speech.mp3"
 CHROMA_COLLECTION_NAME = "youtube_video_knowledge"
+CHROMA_DB_ZIP_URL = "https://github.com/your-username/your-repo/raw/main/chroma_db.zip"  # Update this to your repo or HF URL
 
+# ----------------------------
+# Prompt template
+# ----------------------------
 custom_template = """
 You are a helpful and knowledgeable baby food assistant.
 
@@ -43,6 +55,22 @@ Answer:
 """
 CUSTOM_PROMPT = ChatPromptTemplate.from_template(custom_template)
 
+# ----------------------------
+# Helper functions
+# ----------------------------
+def download_chroma_db():
+    """Download and unzip ChromaDB if not present."""
+    if not os.path.exists(PERSIST_DIRECTORY):
+        st.info("Downloading ChromaDB, please wait...")
+        r = requests.get(CHROMA_DB_ZIP_URL, stream=True)
+        zip_path = "chroma_db.zip"
+        with open(zip_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(".")
+        os.remove(zip_path)
+        st.success("ChromaDB downloaded successfully!")
 
 def transcribe_audio(audio_bytes: bytes) -> str:
     try:
@@ -55,7 +83,6 @@ def transcribe_audio(audio_bytes: bytes) -> str:
         st.error(f"Error during transcription: {e}")
         return ""
 
-
 def generate_and_play_audio(text: str):
     try:
         response = openai.audio.speech.create(model="tts-1", voice="alloy", input=text)
@@ -64,8 +91,7 @@ def generate_and_play_audio(text: str):
     except Exception as e:
         st.error(f"Error generating or playing audio: {e}")
 
-
-def load_conversation_chain():   #RAG
+def load_conversation_chain():
     """Return (chain, vector_store)"""
     try:
         embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
@@ -75,7 +101,6 @@ def load_conversation_chain():   #RAG
             collection_name=CHROMA_COLLECTION_NAME
         )
         memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
         chain = ConversationalRetrievalChain.from_llm(
             llm=LangchainOpenAI(temperature=0),
             retriever=vector_store.as_retriever(),
@@ -87,10 +112,16 @@ def load_conversation_chain():   #RAG
         st.error(f"Error initializing the conversation chain: {e}")
         return None, None
 
-
+# ----------------------------
+# Main Streamlit app
+# ----------------------------
 def main():
     st.set_page_config(page_title="Baby's First Bites", page_icon="👶", layout="wide")
-
+    
+    # Download ChromaDB if missing
+    download_chroma_db()
+    
+    # Sidebar: ingest new video
     st.sidebar.header("Upload Your Own Video 📹")
     with st.sidebar.expander("Ingest a new YouTube video"):
         user_video_url = st.text_input("Enter YouTube video URL:")
@@ -100,14 +131,14 @@ def main():
                     try:
                         chunks_added = ingest_video_from_url(user_video_url)
                         st.success(f"Video ingested successfully! {chunks_added} chunks added.")
-                        # re-load chain & vector store and save them separately
+                        # Reload chain
                         st.session_state.chain, st.session_state.vector_store = load_conversation_chain()
                     except Exception as e:
                         st.error(f"Ingestion failed: {e}")
             else:
                 st.warning("Please enter a valid YouTube URL.")
-
-    # header
+    
+    # Header
     col1, col2 = st.columns([1, 4])
     with col1:
         st.image("https://em-content.zobj.net/source/microsoft-teams/337/baby_1f476.png", width=150)
@@ -118,21 +149,17 @@ def main():
         Ask me anything about solid foods, ingredients, or preparation based on the videos and recipes I've learned from.
         """)
     st.markdown("---")
-
-    if not os.path.exists(PERSIST_DIRECTORY):
-        st.warning("Vector database not found. Please ingest a video first.")
-        return
-
-    # init chain & vector_store into session_state
+    
+    # Initialize chain & session state
     if "chain" not in st.session_state:
         st.session_state.chain, st.session_state.vector_store = load_conversation_chain()
     if "messages" not in st.session_state:
         st.session_state.messages = []
-
+    
     if not st.session_state.chain:
         st.stop()
-
-    # suggested prompts
+    
+    # Suggested prompts
     prompt_buttons = {
         "Iron-Rich Foods": "What iron-rich foods are good for babies?",
         "Protein-Rich Foods": "What protein-rich foods are good for babies?",
@@ -147,21 +174,24 @@ def main():
             "DO NOT use the word 'metadata' in your reply."
         )
     }
-
+    
     btn_cols = st.columns(4)
     final_prompt = None
     for i, (label, question) in enumerate(prompt_buttons.items()):
         if btn_cols[i % 4].button(label):
             final_prompt = question
-
+    
+    # Display previous messages
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-
+    
+    # Chat input
     prompt_text = st.chat_input("Ask about ingredients, steps, or cooking times...")
     st.markdown("<p style='text-align: center; color: gray;'>— OR —</p>", unsafe_allow_html=True)
+    
     audio_info = mic_recorder(start_prompt="Record your question 🎤", stop_prompt="Click to Stop ⏹️", key='recorder')
-
+    
     if prompt_text:
         final_prompt = prompt_text
     elif audio_info:
@@ -169,19 +199,19 @@ def main():
         with st.spinner("Transcribing your voice..."):
             final_prompt = transcribe_audio(audio_bytes)
             st.info(f"Recognized text: \"{final_prompt}\"")
-
+    
+    # Generate response
     if final_prompt:
         st.session_state.messages.append({"role": "user", "content": final_prompt})
         with st.chat_message("user"):
             st.markdown(final_prompt)
-
+        
         with st.spinner("Thinking..."):
             try:
                 if final_prompt == prompt_buttons["Recipe of the Day"]:
                     llm = LangchainOpenAI(temperature=0)
                     answer = llm(prompt_buttons["Recipe of the Day"])
                 else:
-                    # use chain.invoke for the conversational retrieval chain
                     response = st.session_state.chain.invoke({"question": final_prompt})
                     answer = response.get("answer", "Sorry, I couldn't find a good answer.")
                 st.session_state.messages.append({"role": "assistant", "content": answer})
@@ -193,7 +223,6 @@ def main():
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
                 with st.chat_message("assistant"):
                     st.markdown(error_msg)
-
 
 if __name__ == "__main__":
     main()
